@@ -1,0 +1,130 @@
+name: Auto-Versioned Build & Release APK
+
+on:
+  push:
+    branches: [ "main" ]
+    tags:
+      - 'v*'
+  pull_request:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    # Bỏ qua lượt chạy nhánh main nếu commit đó vừa được push kèm tag release(vX.Y.Z) để tránh tạo 2 bản trùng nhau
+    if: >
+      startsWith(github.ref, 'refs/tags/v') ||
+      github.event_name == 'pull_request' ||
+      github.event_name == 'workflow_dispatch' ||
+      !startsWith(github.event.head_commit.message, 'release(v')
+    name: Build & Publish Versioned APK
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Full Git History (for Version & Changelog)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Compute Unique Version & Automatic Changelog
+        id: meta
+        run: |
+          SHORT_SHA="${GITHUB_SHA::7}"
+          BASE_VER=$(cat VERSION.txt 2>/dev/null | tr -d '[:space:]' || echo "1.0.1")
+          MAJOR=$(echo "$BASE_VER" | cut -d. -f1)
+          MINOR=$(echo "$BASE_VER" | cut -d. -f2)
+
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            TAG_NAME="${GITHUB_REF_NAME}"
+            VER_NAME="${TAG_NAME#v}"
+            PATCH=$(echo "$VER_NAME" | cut -d. -f3)
+            VER_CODE=$(( MAJOR * 10000 + MINOR * 100 + PATCH + GITHUB_RUN_NUMBER ))
+          else
+            # Mỗi lần push trực tiếp lên main tự động tăng số bản build để không bao giờ ghi đè bản cũ
+            VER_NAME="${MAJOR}.${MINOR}.${GITHUB_RUN_NUMBER}-b${GITHUB_RUN_NUMBER}"
+            TAG_NAME="v${MAJOR}.${MINOR}.${GITHUB_RUN_NUMBER}"
+            # Nếu tag này đã tồn tại do đánh tag thủ công trước đó thì gắn thêm hậu tố run_number
+            if git rev-parse "$TAG_NAME" >/dev/null 2>&1; then
+              TAG_NAME="v${MAJOR}.${MINOR}.${GITHUB_RUN_NUMBER}-run${GITHUB_RUN_NUMBER}"
+            fi
+            VER_CODE=$(( 10000 + GITHUB_RUN_NUMBER ))
+          fi
+
+          PREV_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
+          {
+            echo "tag_name=${TAG_NAME}"
+            echo "ver_name=${VER_NAME}"
+            echo "ver_code=${VER_CODE}"
+            echo "short_sha=${SHORT_SHA}"
+            echo "prev_tag=${PREV_TAG}"
+          } >> "$GITHUB_OUTPUT"
+
+          # Sinh ghi chú thay đổi chi tiết để biết chính xác phiên bản này sửa gì
+          NOTES_FILE="release_notes.md"
+          echo "### 📸 Locket Photobooth Native — Phiên bản \`${TAG_NAME}\` (Build #${GITHUB_RUN_NUMBER})" > "$NOTES_FILE"
+          echo "- **Mã Commit**: \`${SHORT_SHA}\`" >> "$NOTES_FILE"
+          echo "- **Android Version**: \`${VER_NAME}\` (\`versionCode = ${VER_CODE}\`)" >> "$NOTES_FILE"
+          echo "" >> "$NOTES_FILE"
+          echo "#### 📝 Các thay đổi trong phiên bản này:" >> "$NOTES_FILE"
+          if [[ -n "$PREV_TAG" ]]; then
+            git log "${PREV_TAG}..HEAD" --pretty=format:"- %s (\`%h\`)" >> "$NOTES_FILE"
+            echo "" >> "$NOTES_FILE"
+            echo "" >> "$NOTES_FILE"
+            echo "#### 📂 Tệp mã nguồn đã chỉnh sửa so với \`${PREV_TAG}\`:" >> "$NOTES_FILE"
+            echo '```text' >> "$NOTES_FILE"
+            git diff --stat "${PREV_TAG}..HEAD" >> "$NOTES_FILE"
+            echo '```' >> "$NOTES_FILE"
+            echo "" >> "$NOTES_FILE"
+            echo "🔍 **So sánh chi tiết từng dòng code**: https://github.com/${GITHUB_REPOSITORY}/compare/${PREV_TAG}...${TAG_NAME}" >> "$NOTES_FILE"
+          else
+            git log -n 5 --pretty=format:"- %s (\`%h\`)" >> "$NOTES_FILE"
+            echo "" >> "$NOTES_FILE"
+          fi
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+          cache: gradle
+
+      - name: Grant execute permission for gradlew
+        run: chmod +x gradlew
+
+      - name: Build Signed Release & Debug APKs with Version Metadata
+        run: |
+          ./gradlew assembleRelease assembleDebug \
+            -PappVersionCode="${{ steps.meta.outputs.ver_code }}" \
+            -PappVersionName="${{ steps.meta.outputs.ver_name }}" \
+            -PgitCommitSha="${{ steps.meta.outputs.short_sha }}" \
+            --stacktrace
+
+      - name: Rename APKs with Explicit Version & Commit Hash
+        run: |
+          mkdir -p dist
+          cp app/build/outputs/apk/release/*.apk "dist/Locket-Photobooth-${{ steps.meta.outputs.tag_name }}-${{ steps.meta.outputs.short_sha }}-release.apk"
+          cp app/build/outputs/apk/debug/*.apk "dist/Locket-Photobooth-${{ steps.meta.outputs.tag_name }}-${{ steps.meta.outputs.short_sha }}-debug.apk"
+          ls -lh dist/
+
+      - name: Upload Versioned APK Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: Locket-Photobooth-${{ steps.meta.outputs.tag_name }}-${{ steps.meta.outputs.short_sha }}
+          path: dist/*.apk
+          if-no-files-found: error
+
+      - name: Publish Distinct GitHub Release for This Version
+        uses: softprops/action-gh-release@v2
+        if: github.event_name != 'pull_request'
+        with:
+          tag_name: ${{ steps.meta.outputs.tag_name }}
+          name: "Locket Photobooth Native ${{ steps.meta.outputs.tag_name }} (${{ steps.meta.outputs.short_sha }})"
+          body_path: release_notes.md
+          files: dist/*.apk
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
