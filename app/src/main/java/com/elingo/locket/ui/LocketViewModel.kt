@@ -35,6 +35,7 @@ import com.elingo.locket.core.model.NearbyPlace
 import com.elingo.locket.core.model.StreakAnchor
 import com.elingo.locket.core.model.StreakState
 import com.elingo.locket.core.model.WeatherInfo
+import com.elingo.locket.core.network.LocketApiException
 import com.elingo.locket.media.processor.PhotoProcessor
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -130,6 +131,11 @@ class LocketViewModel(
     val supporterStatus = sessionManager.supporterStatus
     val themeId = sessionManager.themeId
     val isGlassStyle = sessionManager.isGlassStyle
+    val showCardsButton = sessionManager.showCardsButton
+    val showAccountsButton = sessionManager.showAccountsButton
+
+    private val _totalOutboxCount = MutableStateFlow(0)
+    val totalOutboxCount: StateFlow<Int> = _totalOutboxCount.asStateFlow()
 
     private val _activeTab = MutableStateFlow(RootTab.CAMERA)
     val activeTab: StateFlow<RootTab> = _activeTab.asStateFlow()
@@ -284,6 +290,7 @@ class LocketViewModel(
                 launch { refreshConversations() }
                 launch { loadCaptionPresetsIfNeeded() }
                 launch { apiClient.syncDonateStatus() }
+                launch { runCatching { apiClient.upgradeLegacyStoredCredentials() } }
                 launch {
                     runCatching { apiClient.getMemoriesStats() }.onSuccess { (anchor, total) ->
                         sessionManager.saveStreakAnchor(uid, anchor, total)
@@ -499,6 +506,21 @@ class LocketViewModel(
         }
     }
 
+    fun pruneGoneMoment(momentId: String) {
+        if (momentId.isBlank()) return
+        _feedState.update { st -> st.copy(moments = st.moments.filterNot { it.id == momentId }) }
+        _allMomentsForMemories.update { list -> list.filterNot { it.id == momentId } }
+    }
+
+    fun onMomentMediaError(moment: Moment, failedUrl: String?) {
+        if (moment.isPrivate || moment.localStatus != null || failedUrl.isNullOrBlank()) return
+        viewModelScope.launch {
+            if (apiClient.checkFirebaseMediaGone(failedUrl)) {
+                pruneGoneMoment(moment.id)
+            }
+        }
+    }
+
     fun openMomentActivity(momentId: String) {
         viewModelScope.launch {
             _feedState.update { it.copy(activeActivityMomentId = momentId, activeActivity = null) }
@@ -506,9 +528,13 @@ class LocketViewModel(
                 .onSuccess { act ->
                     _feedState.update { it.copy(activeActivity = act) }
                 }
-                .onFailure {
-                    _feedState.update { it.copy(activeActivityMomentId = null) }
-                    showBanner(it.localizedMessage ?: "Không tải được lượt xem")
+                .onFailure { err ->
+                    _feedState.update { it.copy(activeActivityMomentId = null, activeActivity = null) }
+                    if ((err as? LocketApiException)?.errorCode == "MOMENT_GONE") {
+                        pruneGoneMoment(momentId)
+                    } else {
+                        showBanner(err.localizedMessage ?: "Không tải được lượt xem")
+                    }
                 }
         }
     }
@@ -878,6 +904,36 @@ class LocketViewModel(
     fun setTheme(id: String) = sessionManager.setTheme(id)
 
     fun setGlassStyle(glass: Boolean) = sessionManager.setGlassStyle(glass)
+
+    fun setShowCardsButton(show: Boolean) = sessionManager.setShowCardsButton(show)
+
+    fun setShowAccountsButton(show: Boolean) = sessionManager.setShowAccountsButton(show)
+
+    fun refreshTotalOutboxCount() {
+        viewModelScope.launch(Dispatchers.IO) {
+            _totalOutboxCount.value = runCatching { outboxDao.countAllItems() }.getOrDefault(0)
+        }
+    }
+
+    fun clearAllDeviceData(context: Context) {
+        viewModelScope.launch {
+            inboxPollJob?.cancel()
+            chatThreadPollJob?.cancel()
+            withContext(Dispatchers.IO) {
+                runCatching { outboxDao.deleteAll() }
+                runCatching { File(context.filesDir, "outbox_media").deleteRecursively() }
+                runCatching { File(context.cacheDir, "coil_media_cache").deleteRecursively() }
+                runCatching { File(context.cacheDir, "shared").deleteRecursively() }
+            }
+            sessionManager.clearAllDeviceData()
+            _feedState.value = FeedUiState()
+            _socialState.value = SocialUiState()
+            _allMomentsForMemories.value = emptyList()
+            _streakState.value = StreakState()
+            _totalOutboxCount.value = 0
+            showBanner("Đã xoá toàn bộ dữ liệu trên thiết bị này")
+        }
+    }
 
     fun loadSupporterDetails() {
         viewModelScope.launch {

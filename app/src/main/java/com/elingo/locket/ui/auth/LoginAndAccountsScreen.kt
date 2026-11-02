@@ -1,5 +1,6 @@
 package com.elingo.locket.ui.auth
 
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -47,6 +48,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -55,16 +57,21 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
+import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
+import com.elingo.locket.R
 import com.elingo.locket.core.model.SavedAccount
+import com.elingo.locket.ui.legal.LegalDocKind
+import com.elingo.locket.ui.legal.LegalDocumentsSheet
 import com.elingo.locket.ui.theme.LocalLocketPalette
 
 @Composable
@@ -79,6 +86,7 @@ fun LoginScreen(
     var email by rememberSaveable { mutableStateOf("") }
     var password by rememberSaveable { mutableStateOf("") }
     var showPassword by rememberSaveable { mutableStateOf(false) }
+    var openLegalKind by remember { mutableStateOf<LegalDocKind?>(null) }
 
     Column(
         modifier = Modifier
@@ -93,23 +101,24 @@ fun LoginScreen(
     ) {
         Spacer(modifier = Modifier.height(20.dp))
 
-        // App Brand Emblem
+        // Official App Brand Emblem (reconstructed from locket-icon.e692ef7377b8d16a87f7.png)
         Box(
             modifier = Modifier
-                .size(84.dp)
+                .size(88.dp)
                 .clip(RoundedCornerShape(26.dp))
                 .background(
                     Brush.linearGradient(
                         listOf(palette.spec.accent, palette.spec.accentSecondary)
                     )
-                ),
+                )
+                .border(1.5.dp, palette.cardBorder, RoundedCornerShape(26.dp)),
             contentAlignment = Alignment.Center
         ) {
-            Icon(
-                imageVector = Icons.Default.CameraAlt,
+            Image(
+                painter = painterResource(id = R.drawable.locket_brand_icon),
                 contentDescription = "Locket Photobooth",
-                tint = palette.spec.onAccent,
-                modifier = Modifier.size(42.dp)
+                contentScale = ContentScale.Crop,
+                modifier = Modifier.fillMaxSize()
             )
         }
 
@@ -297,12 +306,49 @@ fun LoginScreen(
                 )
                 Spacer(modifier = Modifier.width(6.dp))
                 Text(
-                    text = "Mã hóa chuẩn AES-256-CBC & Android Keystore bảo mật",
+                    text = "Mã hóa bất đối xứng RSA-OAEP-256 & Android Keystore",
                     fontSize = 11.5.sp,
                     color = palette.mutedText
                 )
             }
+
+            Spacer(modifier = Modifier.height(10.dp))
+
+            Row(
+                horizontalArrangement = Arrangement.Center,
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text(
+                    text = "Điều khoản sử dụng",
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    color = palette.spec.accent,
+                    textDecoration = TextDecoration.Underline,
+                    modifier = Modifier.clickable { openLegalKind = LegalDocKind.TERMS }
+                )
+                Text(
+                    text = "  •  ",
+                    fontSize = 12.sp,
+                    color = palette.mutedText
+                )
+                Text(
+                    text = "Chính sách quyền riêng tư",
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    color = palette.spec.accent,
+                    textDecoration = TextDecoration.Underline,
+                    modifier = Modifier.clickable { openLegalKind = LegalDocKind.PRIVACY }
+                )
+            }
         }
+    }
+
+    openLegalKind?.let { kind ->
+        LegalDocumentsSheet(
+            initialKind = kind,
+            onDismiss = { openLegalKind = null }
+        )
     }
 }
 

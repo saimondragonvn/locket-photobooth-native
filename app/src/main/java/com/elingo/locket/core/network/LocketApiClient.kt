@@ -2,6 +2,7 @@ package com.elingo.locket.core.network
 
 import com.elingo.locket.core.auth.SessionManager
 import com.elingo.locket.core.crypto.OpenSslAesCipher
+import com.elingo.locket.core.crypto.RsaOaepLoginCipher
 import com.elingo.locket.core.model.CaptionOverlayConfig
 import com.elingo.locket.core.model.CaptionPreset
 import com.elingo.locket.core.model.ChatMessage
@@ -51,6 +52,7 @@ import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import java.io.File
 import java.io.IOException
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 
 class LocketApiException(
@@ -81,6 +83,10 @@ class LocketApiClient(
     }
 
     private val refreshMutex = Mutex()
+    private val loginKeyMutex = Mutex()
+    @Volatile
+    private var cachedLoginSpki: String? = null
+    private val mediaGoneCache = ConcurrentHashMap<String, Boolean>()
 
     private val apiHttpClient: OkHttpClient = OkHttpClient.Builder()
         .connectTimeout(20, TimeUnit.SECONDS)
@@ -98,14 +104,81 @@ class LocketApiClient(
         .build()
 
     // =========================================================================
-    // 1. AUTHENTICATION, AES ENCRYPTION & 401 MUTEX REFRESH
+    // 1. AUTHENTICATION, RSA-OAEP-256 ENCRYPTION & 401 MUTEX REFRESH
     // =========================================================================
 
+    /**
+     * Fetches and caches the X.509 SPKI RSA-OAEP-256 public key from `GET /locket/login-key`
+     * (exact port of `St` in `main.434d302f.js` Module 8406).
+     */
+    suspend fun getLoginPublicKeySpki(forceRefresh: Boolean = false): String = withContext(Dispatchers.IO) {
+        if (!forceRefresh) {
+            cachedLoginSpki?.let { return@withContext it }
+        }
+        loginKeyMutex.withLock {
+            if (!forceRefresh) {
+                cachedLoginSpki?.let { return@withLock it }
+            }
+            val req = Request.Builder()
+                .url("$BASE_URL/login-key")
+                .get()
+                .build()
+            try {
+                apiHttpClient.newCall(req).execute().use { resp ->
+                    val raw = resp.body?.string().orEmpty()
+                    if (!resp.isSuccessful) {
+                        cachedLoginSpki = null
+                        throw parseApiError(resp.code, raw, "Không lấy được khóa mã hóa đăng nhập")
+                    }
+                    val obj = json.parseToJsonElement(raw).jsonObject
+                    val spki = obj["spki"]?.jsonPrimitive?.contentOrNull
+                        ?.takeIf { it.isNotBlank() }
+                        ?: throw LocketApiException("Máy chủ không trả về khóa công khai SPKI", resp.code)
+                    cachedLoginSpki = spki
+                    spki
+                }
+            } catch (e: Throwable) {
+                cachedLoginSpki = null
+                throw e
+            }
+        }
+    }
+
+    /**
+     * Asymmetric RSA-OAEP-256 login with automatic `LOGIN_KEY_STALE` retry
+     * (exact port of `qt` & `_t` in `main.434d302f.js` Module 8406).
+     */
     suspend fun login(email: String, password: String): LocketSession = withContext(Dispatchers.IO) {
-        val creds = OpenSslAesCipher.encryptCredentials(email, password)
-        val session = loginWithEncryptedCredentials(creds, email.trim())
-        sessionManager.saveSession(session, creds)
-        session
+        val cleanEmail = email.trim()
+        var attempt = 0
+        while (true) {
+            val spki = getLoginPublicKeySpki(forceRefresh = attempt > 0)
+            val creds = try {
+                RsaOaepLoginCipher.encryptCredentials(spki, cleanEmail, password)
+            } catch (e: IllegalArgumentException) {
+                throw LocketApiException(e.message ?: "Email hoặc mật khẩu quá dài", 400)
+            }
+
+            try {
+                val session = loginWithEncryptedCredentials(creds, cleanEmail)
+                sessionManager.saveSession(
+                    newSession = session,
+                    encryptedCreds = creds,
+                    rawEmailForKeystore = cleanEmail,
+                    rawPasswordForKeystore = password
+                )
+                return@withContext session
+            } catch (e: LocketApiException) {
+                if (attempt == 0 && e.errorCode == "LOGIN_KEY_STALE") {
+                    cachedLoginSpki = null
+                    attempt++
+                    continue
+                }
+                throw e
+            }
+        }
+        @Suppress("UNREACHABLE_CODE")
+        throw LocketApiException("Đăng nhập thất bại")
     }
 
     private fun loginWithEncryptedCredentials(
@@ -148,6 +221,68 @@ class LocketApiClient(
                 expiresAtMillis = System.currentTimeMillis() + expiresIn * 1000L
             )
         }
+    }
+
+    /**
+     * Exact Native port of `uG` + `Qt` (`POST /locket/upgrade-login` in `main.434d302f.js` Modules 4891 & 8406):
+     * Automatically migrates any legacy v1 OpenSSL AES (`U2FsdGVkX1...`) stored credentials to RSA-OAEP-256.
+     */
+    suspend fun upgradeLegacyStoredCredentials() = withContext(Dispatchers.IO) {
+        val candidates = LinkedHashMap<Pair<String, String>, OpenSslAesCipher.EncryptedCredentials>()
+        sessionManager.getStoredEncryptedCredentials()
+            ?.takeIf { RsaOaepLoginCipher.hasLegacyCredentials(it) }
+            ?.let { candidates[it.encryptedEmail to it.encryptedPassword] = it }
+
+        sessionManager.savedAccounts.value.forEach { acc ->
+            val eEmail = acc.encryptedEmail
+            val ePass = acc.encryptedPassword
+            if (!eEmail.isNullOrBlank() && !ePass.isNullOrBlank()) {
+                val c = OpenSslAesCipher.EncryptedCredentials(eEmail, ePass)
+                if (RsaOaepLoginCipher.hasLegacyCredentials(c)) {
+                    candidates[eEmail to ePass] = c
+                }
+            }
+        }
+
+        if (candidates.isEmpty()) return@withContext
+        val orderedList = candidates.values.toList()
+
+        val data = postAuthenticatedJson("/upgrade-login", "Không nâng cấp được dữ liệu đăng nhập") { token ->
+            buildJsonObject {
+                put("idToken", token)
+                put(
+                    "logins",
+                    buildJsonArray {
+                        orderedList.forEach { item ->
+                            add(
+                                buildJsonObject {
+                                    put("email", item.encryptedEmail)
+                                    put("password", item.encryptedPassword)
+                                }
+                            )
+                        }
+                    }
+                )
+            }
+        }
+
+        val returnedArr = data["logins"]?.takeIf { it is JsonArray }?.jsonArray ?: return@withContext
+        val replacementMap = mutableMapOf<Pair<String, String>, OpenSslAesCipher.EncryptedCredentials?>()
+
+        orderedList.forEachIndexed { idx, oldCreds ->
+            val resObj = returnedArr.getOrNull(idx)?.takeIf { it is JsonObject }?.jsonObject ?: return@forEachIndexed
+            val newEmail = resObj["email"]?.jsonPrimitive?.contentOrNull
+            val newPass = resObj["password"]?.jsonPrimitive?.contentOrNull
+            val err = resObj["error"]?.jsonPrimitive?.contentOrNull
+            val key = oldCreds.encryptedEmail to oldCreds.encryptedPassword
+            if (!newEmail.isNullOrBlank() && !newPass.isNullOrBlank()) {
+                replacementMap[key] = OpenSslAesCipher.EncryptedCredentials(newEmail, newPass)
+            } else if (err == "LOGIN_DATA_INVALID") {
+                replacementMap[key] = null
+            }
+        }
+
+        sessionManager.replaceUpgradedCredentials(replacementMap)
     }
 
     suspend fun ensureValidToken(forceRefresh: Boolean = false): String = withContext(Dispatchers.IO) {
@@ -206,10 +341,23 @@ class LocketApiClient(
         }.getOrNull()
     }
 
-    private fun tryReLoginFromStoredCredentials(current: LocketSession): LocketSession? {
-        val creds = sessionManager.getStoredEncryptedCredentials() ?: return null
+    private suspend fun tryReLoginFromStoredCredentials(current: LocketSession): LocketSession? {
+        val creds = sessionManager.getStoredEncryptedCredentials()
+        if (creds != null && !RsaOaepLoginCipher.hasLegacyCredentials(creds)) {
+            val fromStored = runCatching {
+                loginWithEncryptedCredentials(creds, current.email)
+            }.getOrNull()
+            if (fromStored != null) return fromStored
+        }
+
+        // Fallback: re-encrypt from Android Keystore using fresh `/locket/login-key` SPKI
+        val rawPair = sessionManager.getKeystoreRawCredentials(current.localId) ?: return null
         return runCatching {
-            loginWithEncryptedCredentials(creds, current.email)
+            val spki = getLoginPublicKeySpki(forceRefresh = true)
+            val freshCreds = RsaOaepLoginCipher.encryptCredentials(spki, rawPair.first, rawPair.second)
+            val freshSession = loginWithEncryptedCredentials(freshCreds, rawPair.first)
+            sessionManager.saveSession(freshSession, freshCreds)
+            freshSession
         }.getOrNull()
     }
 
@@ -696,6 +844,34 @@ class LocketApiClient(
             people = people,
             users = parseUsersMap(data["users"])
         )
+    }
+
+    /**
+     * Exact Native port of `kn` (`POST /locket/media-status` in `main.434d302f.js` Module 8406, line 2522):
+     * Checks whether a dead Firebase Storage thumbnail/video URL has been deleted on Locket so the UI can auto-prune it.
+     */
+    suspend fun checkFirebaseMediaGone(url: String?): Boolean {
+        if (url.isNullOrBlank() || !url.startsWith("https://firebasestorage.googleapis.com/")) {
+            return false
+        }
+        mediaGoneCache[url]?.let { return it }
+        return runCatching {
+            val data = postAuthenticatedJson("/media-status", "Không kiểm tra được trạng thái tệp") { token ->
+                buildJsonObject {
+                    put("idToken", token)
+                    put("urls", buildJsonArray { add(JsonPrimitive(url)) })
+                }
+            }
+            val goneUrls = data["gone"]?.takeIf { it is JsonArray }?.jsonArray
+                ?.mapNotNull { it.jsonPrimitive.contentOrNull }
+                .orEmpty()
+            val isGone = url in goneUrls
+            mediaGoneCache[url] = isGone
+            isGone
+        }.getOrElse {
+            mediaGoneCache.remove(url)
+            false
+        }
     }
 
     suspend fun deleteMoment(momentUid: String, ownerUid: String) {
@@ -1290,12 +1466,16 @@ class LocketApiClient(
         }
 
         val tokenKey = serverMsg.substringBefore(" ").removeSuffix(":")
-        val friendly = AUTH_ERROR_MAP[tokenKey] ?: when {
+        val friendly = when {
+            errCode != null && errCode in DIRECT_PASS_THROUGH_ERROR_CODES && serverMsg.isNotBlank() -> {
+                AUTH_ERROR_MAP[tokenKey] ?: serverMsg
+            }
+            AUTH_ERROR_MAP.containsKey(tokenKey) -> AUTH_ERROR_MAP.getValue(tokenKey)
             statusCode == 401 -> "Phiên đăng nhập đã hết hạn, vui lòng đăng nhập lại"
-            statusCode == 413 -> serverMsg.ifBlank { "Tệp quá lớn so với giới hạn máy chủ" }
-            statusCode == 429 -> serverMsg.ifBlank { "Thao tác quá nhanh, vui lòng thử lại sau ít phút" }
+            statusCode == 413 -> serverMsg.ifBlank { "File quá lớn" }
+            statusCode == 429 -> serverMsg.ifBlank { "Thao tác quá nhanh, thử lại sau ít phút" }
             serverMsg.isNotBlank() -> "$fallback: $serverMsg"
-            else -> "$fallback (HTTP $statusCode)"
+            else -> "$fallback (lỗi $statusCode)"
         }
         return LocketApiException(
             message = friendly,
@@ -1311,11 +1491,20 @@ class LocketApiClient(
 
         private val AUTH_ERROR_MAP = mapOf(
             "INVALID_LOGIN_CREDENTIALS" to "Email hoặc mật khẩu không đúng",
-            "INVALID_PASSWORD" to "Email hoặc mật khẩu không đúng",
-            "EMAIL_NOT_FOUND" to "Email hoặc mật khẩu không đúng",
-            "INVALID_EMAIL" to "Định dạng email không hợp lệ",
-            "USER_DISABLED" to "Tài khoản Locket này đã bị khóa",
-            "TOO_MANY_ATTEMPTS_TRY_LATER" to "Đăng nhập sai quá nhiều lần, vui lòng thử lại sau"
+            "INVALID_PASSWORD" to "Mật khẩu không đúng",
+            "EMAIL_NOT_FOUND" to "Email này chưa có tài khoản Locket",
+            "INVALID_EMAIL" to "Email không hợp lệ",
+            "USER_DISABLED" to "Tài khoản đã bị khoá",
+            "TOO_MANY_ATTEMPTS_TRY_LATER" to "Đăng nhập sai quá nhiều lần, thử lại sau"
+        )
+
+        private val DIRECT_PASS_THROUGH_ERROR_CODES = AUTH_ERROR_MAP.keys + setOf(
+            "MISSING_PASSWORD",
+            "LOGIN_LOCKED",
+            "LOGIN_KEY_STALE",
+            "LOGIN_DATA_INVALID",
+            "MOMENT_GONE",
+            "SUPPORTER_REQUIRED"
         )
     }
 }

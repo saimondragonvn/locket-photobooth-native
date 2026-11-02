@@ -86,6 +86,12 @@ interface OutboxDao {
 
     @Query("DELETE FROM outbox_moments WHERE uid = :uid")
     suspend fun deleteAllForUser(uid: String)
+
+    @Query("SELECT COUNT(*) FROM outbox_moments")
+    suspend fun countAllItems(): Int
+
+    @Query("DELETE FROM outbox_moments")
+    suspend fun deleteAll()
 }
 
 @Database(

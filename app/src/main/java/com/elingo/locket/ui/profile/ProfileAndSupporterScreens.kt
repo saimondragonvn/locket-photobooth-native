@@ -27,21 +27,27 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Logout
+import androidx.compose.material.icons.filled.CardGiftcard
 import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.DeleteForever
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Favorite
+import androidx.compose.material.icons.filled.Gavel
 import androidx.compose.material.icons.filled.SwapHoriz
 import androidx.compose.material.icons.filled.Verified
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -61,6 +67,8 @@ import com.elingo.locket.core.model.LocketSession
 import com.elingo.locket.core.model.SupporterStatus
 import com.elingo.locket.ui.SupporterSheetState
 import com.elingo.locket.ui.auth.AccountAvatarCircle
+import com.elingo.locket.ui.legal.LegalDocKind
+import com.elingo.locket.ui.legal.LegalDocumentsSheet
 import com.elingo.locket.ui.theme.LocalLocketPalette
 import com.elingo.locket.ui.theme.LocketThemes
 import java.text.NumberFormat
@@ -74,18 +82,28 @@ fun ProfileAndSettingsScreen(
     supporterSheetState: SupporterSheetState,
     activeThemeId: String,
     isGlassStyle: Boolean,
+    showCardsButton: Boolean = true,
+    showAccountsButton: Boolean = true,
+    pendingOutboxCount: Int = 0,
     onChangeAvatar: (Uri) -> Unit,
     onUpdateName: (firstName: String, lastName: String) -> Unit,
     onSelectTheme: (String) -> Unit,
     onToggleGlass: (Boolean) -> Unit,
+    onToggleShowCards: (Boolean) -> Unit = {},
+    onToggleShowAccounts: (Boolean) -> Unit = {},
     onOpenAccountSwitcher: () -> Unit,
+    onOpenOnlineCards: () -> Unit = {},
     onLoadSupporterDetails: () -> Unit,
     onSaveDonorDisplayName: (String) -> Unit,
+    onPrepareClearDeviceData: () -> Unit = {},
+    onClearAllDeviceData: () -> Unit = {},
     onLogout: () -> Unit
 ) {
     val palette = LocalLocketPalette.current
     var showEditName by remember { mutableStateOf(false) }
     var showSupporterSheet by remember { mutableStateOf(false) }
+    var showClearDataConfirm by remember { mutableStateOf(false) }
+    var activeLegalKind by remember { mutableStateOf<LegalDocKind?>(null) }
 
     val nameParts = remember(session.displayName) {
         val split = session.displayName.trim().split(" ", limit = 2)
@@ -180,14 +198,14 @@ fun ProfileAndSettingsScreen(
                     OutlinedTextField(
                         value = firstName,
                         onValueChange = { firstName = it },
-                        label = { Text("Họ / Tên đệm") },
+                        label = { Text("Tên") },
                         singleLine = true,
                         modifier = Modifier.weight(1f)
                     )
                     OutlinedTextField(
                         value = lastName,
                         onValueChange = { lastName = it },
-                        label = { Text("Tên") },
+                        label = { Text("Họ") },
                         singleLine = true,
                         modifier = Modifier.weight(1f)
                     )
@@ -249,30 +267,59 @@ fun ProfileAndSettingsScreen(
             )
         }
 
-        // 3. 14 Locket Themes + Glass/Solid Appearance
+        // 3. Appearance, Nav Button Toggles (v2) & 14 Locket Themes
         Column(
             modifier = Modifier
                 .fillMaxWidth()
                 .clip(RoundedCornerShape(22.dp))
                 .background(palette.cardContainer)
                 .border(1.dp, palette.cardBorder, RoundedCornerShape(22.dp))
-                .padding(16.dp)
+                .padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
+            Text("Giao diện", fontWeight = FontWeight.ExtraBold, fontSize = 16.sp)
+
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.SpaceBetween
             ) {
-                Column {
-                    Text("Hiệu ứng thẻ Kính mờ (Glass)", fontWeight = FontWeight.Bold, fontSize = 15.sp)
+                Column(modifier = Modifier.weight(1f).padding(end = 12.dp)) {
+                    Text("Hiệu ứng thẻ Kính mờ (Glass)", fontWeight = FontWeight.Bold, fontSize = 14.5.sp)
                     Text("Tắt để chuyển sang nền đặc (Solid)", fontSize = 12.sp, color = palette.mutedText)
                 }
                 Switch(checked = isGlassStyle, onCheckedChange = onToggleGlass)
             }
 
-            Spacer(modifier = Modifier.height(14.dp))
-            Text("Chủ đề màu sắc (14 bảng màu Locket)", fontWeight = FontWeight.Bold, fontSize = 15.sp)
-            Spacer(modifier = Modifier.height(10.dp))
+            HorizontalDivider(color = palette.cardBorder)
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Column(modifier = Modifier.weight(1f).padding(end = 12.dp)) {
+                    Text("Nút làm thiệp online", fontWeight = FontWeight.Bold, fontSize = 14.5.sp)
+                    Text("Hiện trên thanh điều hướng", fontSize = 12.sp, color = palette.mutedText)
+                }
+                Switch(checked = showCardsButton, onCheckedChange = onToggleShowCards)
+            }
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Column(modifier = Modifier.weight(1f).padding(end = 12.dp)) {
+                    Text("Nút chuyển tài khoản", fontWeight = FontWeight.Bold, fontSize = 14.5.sp)
+                    Text("Hiện trên thanh điều hướng", fontSize = 12.sp, color = palette.mutedText)
+                }
+                Switch(checked = showAccountsButton, onCheckedChange = onToggleShowAccounts)
+            }
+
+            HorizontalDivider(color = palette.cardBorder)
+
+            Text("Chủ đề màu sắc (14 bảng màu Locket)", fontWeight = FontWeight.Bold, fontSize = 14.5.sp)
 
             FlowRow(
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -315,20 +362,94 @@ fun ProfileAndSettingsScreen(
             }
         }
 
-        // 4. Logout Button
-        OutlinedButton(
-            onClick = onLogout,
-            shape = RoundedCornerShape(18.dp),
+        // 4. Utilities & Legal (Updated 02/11/2026)
+        Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .height(50.dp)
+                .clip(RoundedCornerShape(22.dp))
+                .background(palette.cardContainer)
+                .border(1.dp, palette.cardBorder, RoundedCornerShape(22.dp))
+                .padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
-            Icon(Icons.AutoMirrored.Filled.Logout, contentDescription = null, tint = Color(0xFFFF6B7A))
-            Spacer(modifier = Modifier.width(8.dp))
-            Text("Đăng xuất khỏi tài khoản này", color = Color(0xFFFF6B7A), fontWeight = FontWeight.Bold)
+            Text("Tiện ích & Pháp lý", fontWeight = FontWeight.ExtraBold, fontSize = 16.sp)
+
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(14.dp))
+                    .clickable { onOpenOnlineCards() }
+                    .padding(vertical = 8.dp, horizontal = 4.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Icon(Icons.Default.CardGiftcard, contentDescription = null, tint = palette.spec.accent)
+                Spacer(modifier = Modifier.width(12.dp))
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("Thiệp Online miễn phí", fontWeight = FontWeight.Bold, fontSize = 14.5.sp)
+                    Text("Tạo thiệp cưới, sinh nhật, kỷ yếu gửi qua link", fontSize = 12.sp, color = palette.mutedText)
+                }
+            }
+
+            HorizontalDivider(color = palette.cardBorder)
+
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(14.dp))
+                    .clickable { activeLegalKind = LegalDocKind.PRIVACY }
+                    .padding(vertical = 8.dp, horizontal = 4.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Icon(Icons.Default.Gavel, contentDescription = null, tint = palette.spec.accent)
+                Spacer(modifier = Modifier.width(12.dp))
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("Điều khoản & Chính sách quyền riêng tư", fontWeight = FontWeight.Bold, fontSize = 14.5.sp)
+                    Text("Cập nhật 02/11/2026 • Mã hóa RSA-OAEP-256", fontSize = 12.sp, color = palette.mutedText)
+                }
+            }
         }
 
-        // 5. Version & Commit Traceability Badge (for multi-version testing & rollback)
+        // 5. Danger Zone (Logout & Clear Device Data matching 947.cbb083e6.chunk.js)
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(22.dp))
+                .background(palette.cardContainer)
+                .border(1.dp, palette.cardBorder, RoundedCornerShape(22.dp))
+                .padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            Text("Vùng nguy hiểm", fontWeight = FontWeight.ExtraBold, fontSize = 16.sp, color = Color(0xFFFF6B7A))
+
+            OutlinedButton(
+                onClick = onLogout,
+                shape = RoundedCornerShape(16.dp),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(48.dp)
+            ) {
+                Icon(Icons.AutoMirrored.Filled.Logout, contentDescription = null, tint = Color(0xFFFF6B7A))
+                Spacer(modifier = Modifier.width(8.dp))
+                Text("Đăng xuất khỏi tài khoản này", color = Color(0xFFFF6B7A), fontWeight = FontWeight.Bold)
+            }
+
+            OutlinedButton(
+                onClick = {
+                    onPrepareClearDeviceData()
+                    showClearDataConfirm = true
+                },
+                shape = RoundedCornerShape(16.dp),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(48.dp)
+            ) {
+                Icon(Icons.Default.DeleteForever, contentDescription = null, tint = Color(0xFFFF6B7A))
+                Spacer(modifier = Modifier.width(8.dp))
+                Text("Xoá dữ liệu trên thiết bị", color = Color(0xFFFF6B7A), fontWeight = FontWeight.Bold)
+            }
+        }
+
+        // 6. Version & Commit Traceability Badge (for multi-version testing & rollback)
         Column(
             modifier = Modifier
                 .fillMaxWidth()
@@ -347,6 +468,50 @@ fun ProfileAndSettingsScreen(
                 color = palette.mutedText.copy(alpha = 0.75f)
             )
         }
+    }
+
+    if (showClearDataConfirm) {
+        val pendingNotice = if (pendingOutboxCount > 0) {
+            " $pendingOutboxCount ảnh/video chưa gửi xong cũng sẽ bị xoá."
+        } else {
+            ""
+        }
+        AlertDialog(
+            onDismissRequest = { showClearDataConfirm = false },
+            containerColor = palette.spec.surface,
+            title = { Text("Xoá dữ liệu trên thiết bị?", fontWeight = FontWeight.Bold) },
+            text = {
+                Text(
+                    "Đăng xuất mọi tài khoản đã lưu, xoá cài đặt và bộ nhớ đệm của ứng dụng trên thiết bị này.$pendingNotice Tài khoản Locket, ảnh đã đăng, bạn bè và tiền ủng hộ không bị ảnh hưởng."
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        showClearDataConfirm = false
+                        onClearAllDeviceData()
+                    },
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = Color(0xFFFF4D5E),
+                        contentColor = Color.White
+                    )
+                ) {
+                    Text("Xoá hết", fontWeight = FontWeight.Bold)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showClearDataConfirm = false }) {
+                    Text("Huỷ")
+                }
+            }
+        )
+    }
+
+    activeLegalKind?.let { kind ->
+        LegalDocumentsSheet(
+            initialKind = kind,
+            onDismiss = { activeLegalKind = null }
+        )
     }
 
     if (showSupporterSheet) {
@@ -432,4 +597,3 @@ fun ProfileAndSettingsScreen(
         }
     }
 }
-

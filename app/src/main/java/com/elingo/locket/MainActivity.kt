@@ -14,20 +14,29 @@ import androidx.activity.viewModels
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CalendarMonth
 import androidx.compose.material.icons.filled.CameraAlt
+import androidx.compose.material.icons.filled.CardGiftcard
 import androidx.compose.material.icons.filled.ChatBubbleOutline
 import androidx.compose.material.icons.filled.PersonOutline
 import androidx.compose.material.icons.filled.PhotoAlbum
+import androidx.compose.material.icons.filled.SwapHoriz
 import androidx.compose.material3.Badge
 import androidx.compose.material3.BadgedBox
 import androidx.compose.material3.Icon
@@ -47,7 +56,9 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -58,6 +69,7 @@ import com.elingo.locket.ui.auth.AccountSwitcherSheet
 import com.elingo.locket.ui.auth.LoginScreen
 import com.elingo.locket.ui.camera.CameraStudioScreen
 import com.elingo.locket.ui.feed.MomentFeedScreen
+import com.elingo.locket.ui.legal.OnlineCardsSheet
 import com.elingo.locket.ui.memories.MemoriesScreen
 import com.elingo.locket.ui.profile.ProfileAndSettingsScreen
 import com.elingo.locket.ui.social.ChatAndFriendsScreen
@@ -109,8 +121,12 @@ private fun LocketRootApp(viewModel: LocketViewModel) {
     val outboxItems by viewModel.outboxItems.collectAsState()
     val themeId by viewModel.themeId.collectAsState()
     val isGlass by viewModel.isGlassStyle.collectAsState()
+    val showCardsButton by viewModel.showCardsButton.collectAsState()
+    val showAccountsButton by viewModel.showAccountsButton.collectAsState()
+    val totalOutboxCount by viewModel.totalOutboxCount.collectAsState()
 
     var showAccountSwitcher by remember { mutableStateOf(false) }
+    var showOnlineCardsSheet by remember { mutableStateOf(false) }
     var isAddingAnotherAccount by remember { mutableStateOf(false) }
 
     var hasCameraPerm by remember {
@@ -176,6 +192,82 @@ private fun LocketRootApp(viewModel: LocketViewModel) {
         } else {
             Scaffold(
                 containerColor = palette.spec.background,
+                topBar = {
+                    if (showCardsButton || showAccountsButton) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .background(palette.spec.surface.copy(alpha = 0.92f))
+                                .statusBarsPadding()
+                                .padding(horizontal = 14.dp, vertical = 6.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Image(
+                                    painter = painterResource(id = R.drawable.locket_brand_icon),
+                                    contentDescription = "Locket Photobooth",
+                                    contentScale = ContentScale.Crop,
+                                    modifier = Modifier
+                                        .size(26.dp)
+                                        .clip(RoundedCornerShape(8.dp))
+                                )
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text(
+                                    text = "Locket Photobooth",
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 14.sp
+                                )
+                            }
+
+                            Row(
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                if (showCardsButton) {
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        modifier = Modifier
+                                            .clip(RoundedCornerShape(50))
+                                            .background(palette.cardContainer)
+                                            .border(1.dp, palette.cardBorder, RoundedCornerShape(50))
+                                            .clickable { showOnlineCardsSheet = true }
+                                            .padding(horizontal = 10.dp, vertical = 5.dp)
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.CardGiftcard,
+                                            contentDescription = "Thiệp Online",
+                                            tint = palette.spec.accent,
+                                            modifier = Modifier.size(15.dp)
+                                        )
+                                        Spacer(modifier = Modifier.width(4.dp))
+                                        Text("Thiệp", fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                                    }
+                                }
+                                if (showAccountsButton) {
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        modifier = Modifier
+                                            .clip(RoundedCornerShape(50))
+                                            .background(palette.cardContainer)
+                                            .border(1.dp, palette.cardBorder, RoundedCornerShape(50))
+                                            .clickable { showAccountSwitcher = true }
+                                            .padding(horizontal = 10.dp, vertical = 5.dp)
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.SwapHoriz,
+                                            contentDescription = "Chuyển tài khoản",
+                                            tint = palette.spec.accent,
+                                            modifier = Modifier.size(15.dp)
+                                        )
+                                        Spacer(modifier = Modifier.width(4.dp))
+                                        Text("Tài khoản", fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                },
                 bottomBar = {
                     NavigationBar(
                         containerColor = palette.spec.surface,
@@ -288,7 +380,8 @@ private fun LocketRootApp(viewModel: LocketViewModel) {
                             onCloseActivity = { viewModel.closeMomentActivity() },
                             onDeleteMoment = { viewModel.deleteMoment(it) },
                             onDownloadMoment = { viewModel.saveOrShareMomentMedia(context, it, shareAfterDownload = false) },
-                            onShareMoment = { viewModel.saveOrShareMomentMedia(context, it, shareAfterDownload = true) }
+                            onShareMoment = { viewModel.saveOrShareMomentMedia(context, it, shareAfterDownload = true) },
+                            onMomentMediaError = { m, url -> viewModel.onMomentMediaError(m, url) }
                         )
 
                         RootTab.MEMORIES -> MemoriesScreen(
@@ -315,13 +408,21 @@ private fun LocketRootApp(viewModel: LocketViewModel) {
                             supporterSheetState = supporterSheet,
                             activeThemeId = themeId,
                             isGlassStyle = isGlass,
+                            showCardsButton = showCardsButton,
+                            showAccountsButton = showAccountsButton,
+                            pendingOutboxCount = totalOutboxCount,
                             onChangeAvatar = { viewModel.updateAvatarFromUri(context, it) },
                             onUpdateName = { f, l -> viewModel.updateAccountName(f, l) },
                             onSelectTheme = { viewModel.setTheme(it) },
                             onToggleGlass = { viewModel.setGlassStyle(it) },
+                            onToggleShowCards = { viewModel.setShowCardsButton(it) },
+                            onToggleShowAccounts = { viewModel.setShowAccountsButton(it) },
                             onOpenAccountSwitcher = { showAccountSwitcher = true },
+                            onOpenOnlineCards = { showOnlineCardsSheet = true },
                             onLoadSupporterDetails = { viewModel.loadSupporterDetails() },
                             onSaveDonorDisplayName = { viewModel.updateDonorDisplayName(it) },
+                            onPrepareClearDeviceData = { viewModel.refreshTotalOutboxCount() },
+                            onClearAllDeviceData = { viewModel.clearAllDeviceData(context) },
                             onLogout = { viewModel.logout() }
                         )
                     }
@@ -367,5 +468,10 @@ private fun LocketRootApp(viewModel: LocketViewModel) {
             onDismiss = { showAccountSwitcher = false }
         )
     }
-}
 
+    if (showOnlineCardsSheet) {
+        OnlineCardsSheet(
+            onDismiss = { showOnlineCardsSheet = false }
+        )
+    }
+}

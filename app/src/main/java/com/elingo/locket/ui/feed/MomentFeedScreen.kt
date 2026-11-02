@@ -97,7 +97,8 @@ fun MomentFeedScreen(
     onCloseActivity: () -> Unit,
     onDeleteMoment: (Moment) -> Unit,
     onDownloadMoment: (Moment) -> Unit,
-    onShareMoment: (Moment) -> Unit
+    onShareMoment: (Moment) -> Unit,
+    onMomentMediaError: (Moment, String?) -> Unit = { _, _ -> }
 ) {
     val context = LocalContext.current
     val palette = LocalLocketPalette.current
@@ -112,12 +113,28 @@ fun MomentFeedScreen(
             playWhenReady = true
         }
     }
-    DisposableEffect(Unit) {
-        onDispose { sharedExoPlayer.release() }
-    }
 
     val settledIndex = pagerState.settledPage
     val settledMoment = feedState.moments.getOrNull(settledIndex)
+
+    DisposableEffect(sharedExoPlayer, settledMoment?.id) {
+        val listener = object : Player.Listener {
+            override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
+                val active = settledMoment
+                if (active != null && active.isVideo) {
+                    onMomentMediaError(active, active.videoUrl)
+                }
+            }
+        }
+        sharedExoPlayer.addListener(listener)
+        onDispose {
+            sharedExoPlayer.removeListener(listener)
+        }
+    }
+
+    DisposableEffect(Unit) {
+        onDispose { sharedExoPlayer.release() }
+    }
 
     LaunchedEffect(settledMoment?.id, feedState.isGridMode) {
         if (feedState.isGridMode || settledMoment == null || !settledMoment.isVideo) {
@@ -231,10 +248,12 @@ fun MomentFeedScreen(
                                     scope.launch { pagerState.scrollToPage(index) }
                                 }
                         ) {
+                            val tileMediaUrl = moment.thumbnailUrl ?: moment.videoUrl
                             AsyncImage(
-                                model = moment.thumbnailUrl ?: moment.videoUrl,
+                                model = tileMediaUrl,
                                 contentDescription = moment.caption,
                                 contentScale = ContentScale.Crop,
+                                onError = { onMomentMediaError(moment, tileMediaUrl) },
                                 modifier = Modifier.fillMaxSize()
                             )
                             if (moment.isVideo) {
@@ -276,7 +295,8 @@ fun MomentFeedScreen(
                         onOpenActivity = { onOpenActivity(moment.id) },
                         onDelete = { onDeleteMoment(moment) },
                         onDownload = { onDownloadMoment(moment) },
-                        onShare = { onShareMoment(moment) }
+                        onShare = { onShareMoment(moment) },
+                        onMediaError = { failedUrl -> onMomentMediaError(moment, failedUrl) }
                     )
                 }
             }
@@ -304,7 +324,8 @@ private fun SingleMomentCardPage(
     onOpenActivity: () -> Unit,
     onDelete: () -> Unit,
     onDownload: () -> Unit,
-    onShare: () -> Unit
+    onShare: () -> Unit,
+    onMediaError: (String?) -> Unit = {}
 ) {
     val palette = LocalLocketPalette.current
     var replyText by remember(moment.id) { mutableStateOf("") }
@@ -326,10 +347,12 @@ private fun SingleMomentCardPage(
                 .background(Color(0xFF121318))
                 .border(1.5.dp, palette.cardBorder, RoundedCornerShape(36.dp))
         ) {
+            val cardThumbUrl = moment.thumbnailUrl ?: moment.videoUrl
             AsyncImage(
-                model = moment.thumbnailUrl ?: moment.videoUrl,
+                model = cardThumbUrl,
                 contentDescription = moment.caption,
                 contentScale = ContentScale.Crop,
+                onError = { onMediaError(cardThumbUrl) },
                 modifier = Modifier.fillMaxSize()
             )
 

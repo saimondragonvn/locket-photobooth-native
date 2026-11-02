@@ -53,17 +53,29 @@ class SessionManager(context: Context) {
     private val _isGlassStyle = MutableStateFlow(prefs.getBoolean(KEY_GLASS_STYLE, true))
     val isGlassStyle: StateFlow<Boolean> = _isGlassStyle.asStateFlow()
 
+    private val _showCardsButton = MutableStateFlow(prefs.getBoolean(KEY_NAV_SHOW_CARDS, true))
+    val showCardsButton: StateFlow<Boolean> = _showCardsButton.asStateFlow()
+
+    private val _showAccountsButton = MutableStateFlow(prefs.getBoolean(KEY_NAV_SHOW_ACCOUNTS, true))
+    val showAccountsButton: StateFlow<Boolean> = _showAccountsButton.asStateFlow()
+
     fun currentSession(): LocketSession? = _session.value
 
     fun saveSession(
         newSession: LocketSession,
-        encryptedCreds: OpenSslAesCipher.EncryptedCredentials? = null
+        encryptedCreds: OpenSslAesCipher.EncryptedCredentials? = null,
+        rawEmailForKeystore: String? = null,
+        rawPasswordForKeystore: String? = null
     ) {
         prefs.edit().apply {
             putString(KEY_ACTIVE_SESSION, json.encodeToString(newSession))
             if (encryptedCreds != null) {
                 putString(KEY_ENC_EMAIL, encryptedCreds.encryptedEmail)
                 putString(KEY_ENC_PASSWORD, encryptedCreds.encryptedPassword)
+            }
+            if (!rawEmailForKeystore.isNullOrBlank() && !rawPasswordForKeystore.isNullOrBlank()) {
+                putString("$KEY_RAW_EMAIL_PREFIX${newSession.localId}", rawEmailForKeystore)
+                putString("$KEY_RAW_PASSWORD_PREFIX${newSession.localId}", rawPasswordForKeystore)
             }
             apply()
         }
@@ -79,6 +91,73 @@ class SessionManager(context: Context) {
             OpenSslAesCipher.EncryptedCredentials(encEmail, encPass)
         } else {
             null
+        }
+    }
+
+    fun getKeystoreRawCredentials(uid: String): Pair<String, String>? {
+        if (uid.isBlank()) return null
+        val email = prefs.getString("$KEY_RAW_EMAIL_PREFIX$uid", null)
+        val pass = prefs.getString("$KEY_RAW_PASSWORD_PREFIX$uid", null)
+        return if (!email.isNullOrBlank() && !pass.isNullOrBlank()) {
+            email to pass
+        } else {
+            null
+        }
+    }
+
+    /**
+     * Exact Native port of `uG` in Module 4891 (`main.434d302f.js`):
+     * Replaces legacy OpenSSL AES (`U2FsdGVkX1...`) credentials with RSA-OAEP-256 upgraded ciphertexts
+     * returned by `POST /locket/upgrade-login`, or clears invalid credentials when `LOGIN_DATA_INVALID` (`null`).
+     */
+    fun replaceUpgradedCredentials(
+        upgradedMap: Map<Pair<String, String>, OpenSslAesCipher.EncryptedCredentials?>
+    ) {
+        if (upgradedMap.isEmpty()) return
+
+        val activeCreds = getStoredEncryptedCredentials()
+        if (activeCreds != null) {
+            val key = activeCreds.encryptedEmail to activeCreds.encryptedPassword
+            if (upgradedMap.containsKey(key)) {
+                val replacement = upgradedMap[key]
+                prefs.edit().apply {
+                    if (replacement != null) {
+                        putString(KEY_ENC_EMAIL, replacement.encryptedEmail)
+                        putString(KEY_ENC_PASSWORD, replacement.encryptedPassword)
+                    } else {
+                        remove(KEY_ENC_EMAIL)
+                        remove(KEY_ENC_PASSWORD)
+                    }
+                    apply()
+                }
+            }
+        }
+
+        val currentAccounts = _savedAccounts.value
+        var changed = false
+        val updatedAccounts = currentAccounts.map { acc ->
+            val eEmail = acc.encryptedEmail
+            val ePass = acc.encryptedPassword
+            if (!eEmail.isNullOrBlank() && !ePass.isNullOrBlank()) {
+                val key = eEmail to ePass
+                if (upgradedMap.containsKey(key)) {
+                    changed = true
+                    val replacement = upgradedMap[key]
+                    acc.copy(
+                        encryptedEmail = replacement?.encryptedEmail,
+                        encryptedPassword = replacement?.encryptedPassword
+                    )
+                } else {
+                    acc
+                }
+            } else {
+                acc
+            }
+        }
+
+        if (changed) {
+            prefs.edit().putString(KEY_SAVED_ACCOUNTS, json.encodeToString(updatedAccounts)).apply()
+            _savedAccounts.value = updatedAccounts
         }
     }
 
@@ -121,17 +200,44 @@ class SessionManager(context: Context) {
 
     fun removeSavedAccount(uid: String) {
         val filtered = _savedAccounts.value.filterNot { it.uid == uid }
-        prefs.edit().putString(KEY_SAVED_ACCOUNTS, json.encodeToString(filtered)).apply()
+        prefs.edit()
+            .putString(KEY_SAVED_ACCOUNTS, json.encodeToString(filtered))
+            .remove("$KEY_RAW_EMAIL_PREFIX$uid")
+            .remove("$KEY_RAW_PASSWORD_PREFIX$uid")
+            .remove("$KEY_STREAK_PREFIX$uid")
+            .remove("$KEY_LOCKETS_COUNT_PREFIX$uid")
+            .apply()
         _savedAccounts.value = filtered
     }
 
     fun logoutCurrentSession() {
-        prefs.edit()
-            .remove(KEY_ACTIVE_SESSION)
-            .remove(KEY_ENC_EMAIL)
-            .remove(KEY_ENC_PASSWORD)
-            .apply()
+        val uid = _session.value?.localId
+        prefs.edit().apply {
+            remove(KEY_ACTIVE_SESSION)
+            remove(KEY_ENC_EMAIL)
+            remove(KEY_ENC_PASSWORD)
+            if (!uid.isNullOrBlank()) {
+                remove("$KEY_RAW_EMAIL_PREFIX$uid")
+                remove("$KEY_RAW_PASSWORD_PREFIX$uid")
+            }
+            apply()
+        }
         _session.value = null
+    }
+
+    /**
+     * Exact Native port of `C()` in `947.cbb083e6.chunk.js` ("Xoá dữ liệu trên thiết bị"):
+     * Wipes all saved sessions, encrypted credentials, appearance settings, and local caches.
+     */
+    fun clearAllDeviceData() {
+        prefs.edit().clear().apply()
+        _session.value = null
+        _savedAccounts.value = emptyList()
+        _supporterStatus.value = SupporterStatus()
+        _themeId.value = "gold"
+        _isGlassStyle.value = true
+        _showCardsButton.value = true
+        _showAccountsButton.value = true
     }
 
     fun updateSupporterStatus(uid: String, totalVnd: Long, tiers: List<PerkTier>?) {
@@ -180,6 +286,16 @@ class SessionManager(context: Context) {
         _isGlassStyle.value = isGlass
     }
 
+    fun setShowCardsButton(show: Boolean) {
+        prefs.edit().putBoolean(KEY_NAV_SHOW_CARDS, show).apply()
+        _showCardsButton.value = show
+    }
+
+    fun setShowAccountsButton(show: Boolean) {
+        prefs.edit().putBoolean(KEY_NAV_SHOW_ACCOUNTS, show).apply()
+        _showAccountsButton.value = show
+    }
+
     private fun upsertSavedAccount(
         session: LocketSession,
         creds: OpenSslAesCipher.EncryptedCredentials?
@@ -225,12 +341,15 @@ class SessionManager(context: Context) {
         private const val KEY_ACTIVE_SESSION = "active_session_v1"
         private const val KEY_ENC_EMAIL = "enc_email_v1"
         private const val KEY_ENC_PASSWORD = "enc_password_v1"
+        private const val KEY_RAW_EMAIL_PREFIX = "ks_raw_email_"
+        private const val KEY_RAW_PASSWORD_PREFIX = "ks_raw_pass_"
         private const val KEY_SAVED_ACCOUNTS = "saved_accounts_v1"
         private const val KEY_SUPPORTER_PREFIX = "supporter_status_"
         private const val KEY_STREAK_PREFIX = "streak_anchor_"
         private const val KEY_LOCKETS_COUNT_PREFIX = "lockets_count_"
         private const val KEY_THEME_ID = "ui_theme_id"
         private const val KEY_GLASS_STYLE = "ui_glass_style"
+        private const val KEY_NAV_SHOW_CARDS = "ui_nav_show_cards"
+        private const val KEY_NAV_SHOW_ACCOUNTS = "ui_nav_show_accounts"
     }
 }
-
